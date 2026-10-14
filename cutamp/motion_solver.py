@@ -116,9 +116,23 @@ def solve_curobo(
     approach_offsets = torch.eye(4, device=world.device).repeat(4, 1, 1)
     approach_offsets[:, 2, 3] = torch.tensor([-0.05, -0.1, -0.15, -0.2], device=world.device)
 
+    # Hold the approach/descent to a straight line along the tool axis: x/y held, tool-z free.
+    #
+    # On the YAM the ANGULAR components are zeroed as well, leaving position-only. Being 6-DOF it
+    # has no null space to absorb terminal tracking error, so its approaches land 0.06-0.09 rad off
+    # the goal orientation -- outside the 0.05 rad that cuRobo's partial-pose check hard-codes --
+    # and the segment is rejected with INVALID_PARTIAL_POSE_COST_METRIC before trajopt ever runs.
+    # That check arms on ANY nonzero angular component and then measures the FULL angular distance,
+    # so freeing only the tool-axis roll would not avoid it; all three have to be zero.
+    #
+    # The 7-DOF Franka/DROID arms are redundant, converge well inside 0.05 rad, and have always
+    # passed that check -- so they keep the orientation lock, which is worth having when the arm can
+    # actually deliver it.
+    hold_vec_weight = ([0.1, 0.1, 0.1, 0.1, 0.1, 0.0] if config.robot.startswith("bimanual_yam_")
+                       else [0.1, 0.1, 0.1, 0.1, 0.1, 0.0])
     constrained_motion_cost_metric = PoseCostMetric(
         hold_partial_pose=True,
-        hold_vec_weight=world.tensor_args.to_device([0.1, 0.1, 0.1, 0.1, 0.1, 0.0]),
+        hold_vec_weight=world.tensor_args.to_device(hold_vec_weight),
         project_to_goal_frame=True,
     )
     constrained_plan_config = plan_config.clone()

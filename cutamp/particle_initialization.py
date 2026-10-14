@@ -58,6 +58,12 @@ _log = logging.getLogger(__name__)
 # half-length, and how much of the end is left unusable so the pads stay on solid material.
 _HANDOVER_END_FRACTION = (0.55, 1.0)
 _HANDOVER_END_MARGIN = 0.02
+# Spread around the jaws-across-the-short-axis yaw, so the particles are not all one wrist branch
+# (see _aim_grasps_for_handover). At 10 deg the jaws still span the short axis to within 1.6%.
+_HANDOVER_YAW_JITTER = 10 * torch.pi / 180
+# How far the object's long axis may tilt away from the arms' separation axis at the exchange.
+# Bounds the loss of hand clearance to cos(tolerance) of the separation along the object.
+_HANDOVER_YAW_TOLERANCE = 30 * torch.pi / 180
 
 
 class ParticleInitializer:
@@ -261,14 +267,29 @@ class ParticleInitializer:
 
         return selected_grasps, selected_confs, is_mat4x4
 
-    def _slide_grasps_to_end(self, grasps, is_mat4x4: bool, obj: str, sign: float):
-        """Slide grasps toward one END of the object's longest horizontal axis, in the object frame.
+    def _aim_grasps_for_handover(self, grasps, is_mat4x4: bool, obj: str, sign: float):
+        """Point the jaws across the object's SHORT axis and slide them toward one END of its long
+        axis, in the object frame.
 
         A handover needs the two hands on OPPOSITE ends of the object -- two 10 cm YAM grippers meeting
         at the same point leave ~1 mm of arm clearance, while a 22 cm bar held at +/-8 cm leaves
         ~127 mm. The heuristic 4-DOF sampler cannot express that: it pins every grasp to the object's
         vertical axis (``translation[:, :2] = 0``), so every candidate it emits is at the same point and
         no amount of "pick the farthest candidate" can separate them. So the offset is applied here.
+
+        The jaws must also close ACROSS the object rather than along it: the grasp frame's y is the
+        jaw axis, so a 4-DOF grasp's yaw sets it to ``(-sin yaw, cos yaw)`` in the object frame, and
+        the uniform yaw the heuristic sampler emits points it along the LONG axis as often as not --
+        the gripper then tries to span the full length instead of the narrow width. Aligning it to
+        the short axis is yaw = 0 when the long axis is x, pi/2 when it is y.
+
+        A parallel jaw is symmetric under 180 deg, but IK is NOT: the two yaws are the same physical
+        grasp reached with different wrist configurations, and one of them is routinely outside an
+        arm's joint limits. Writing a single yaw into all n particles therefore made a whole pick
+        unsolvable whenever that one branch happened to be infeasible -- observed as `left IK
+        success: 0/512` on a loaf lying along world x, where yaw + pi solves 512/512. Since grasps
+        are not optimized, that is unrecoverable, so the flip is sampled per particle and jittered
+        slightly, leaving the population spread over both branches.
 
         ``sign`` selects the end (+1 / -1); grasps are NOT optimized, so this pairing is final.
         """
@@ -288,6 +309,13 @@ class ParticleInitializer:
             grasps[:, axis, 3] += offset
         else:
             grasps[:, axis] += offset
+            if self.config.grasp_dof == 4:
+                base_yaw = 0.0 if axis == 0 else torch.pi / 2
+                flip = torch.pi * torch.randint(0, 2, (n,), device=grasps.device, dtype=grasps.dtype)
+                jitter = torch.empty(n, device=grasps.device, dtype=grasps.dtype).uniform_(
+                    -_HANDOVER_YAW_JITTER, _HANDOVER_YAW_JITTER
+                )
+                grasps[:, 3] = base_yaw + flip + jitter
         return grasps, axis, reach
 
     def __call__(self, plan_skeleton: PlanSkeleton, verbose: bool = True) -> Optional[Particles]:
@@ -742,7 +770,7 @@ class ParticleInitializer:
                 giver = world.arms[0]
                 sel, confs_, is_mat4x4 = self._sample_grasps(obj, num_particles)
                 # The giver takes the +end of the object so the taker can have the -end.
-                sel, _axis, _reach = self._slide_grasps_to_end(sel, is_mat4x4, obj, +1.0)
+                sel, _axis, _reach = self._aim_grasps_for_handover(sel, is_mat4x4, obj, +1.0)
                 particles[grasp] = sel
                 particles[f"{grasp}_confidences"] = confs_
                 obj_from_grasp = sel if is_mat4x4 else (
@@ -779,7 +807,7 @@ class ParticleInitializer:
                 # to the object's -end (the giver holds the +end), then the farthest one is kept, which
                 # is what actually separates real M2T2 grasps.
                 cand, cand_confs, cand_mat = self._sample_grasps(obj, num_particles * 8)
-                cand, axis, reach = self._slide_grasps_to_end(cand, cand_mat, obj, -1.0)
+                cand, axis, reach = self._aim_grasps_for_handover(cand, cand_mat, obj, -1.0)
                 cand_mat4 = cand if cand_mat else (
                     action_4dof_to_mat4x4(cand) if config.grasp_dof == 4 else action_6dof_to_mat4x4(cand)
                 )
@@ -805,14 +833,21 @@ class ParticleInitializer:
                     raise ValueError(f"{hand_pose=} shouldn't already be bound")
                 lo, hi = world.handover_region
                 xyz = sample_between_bounds(num_particles, torch.stack([lo, hi]))
-                yaw = sample_yaw(num_particles, None, world.tensor_args.device)
-                # The giver holds the object's +axis end, so in mid-air that end has to point to the
-                # giver's OWN side of the robot -- otherwise the arms must cross, which is never
-                # collision-free. A uniform yaw gets this wrong half the time, and adding pi fixes
-                # exactly those samples without changing the object's tilt.
+                # The object's long axis has to LIE ALONG the arms' separation axis (world y), with
+                # the giver's +axis end on the giver's own side -- otherwise the arms cross, which is
+                # never collision-free. Only the y-component of the hand separation buys clearance,
+                # so getting the side right is not enough: a uniform yaw leaves the long axis more
+                # than 60 deg off a third of the time, handing the object over across its SHORT
+                # dimension. Measured on the 22 cm bar, that dropped the median separation along y to
+                # 9.4 cm and put the two 10 cm grippers within one gripper width 55% of the time.
+                # So sample a bounded tilt about the aligned yaw, keeping |alignment| >= cos(tol).
                 giver_side = world.arm_side_signs[giver.name]
-                axis_world_y = torch.sin(yaw) if axis == 0 else torch.cos(yaw)
-                yaw = torch.where(axis_world_y * giver_side < 0, yaw + torch.pi, yaw)
+                aligned = torch.pi / 2 if axis == 0 else 0.0
+                yaw = aligned + torch.empty(
+                    num_particles, device=world.tensor_args.device
+                ).uniform_(-_HANDOVER_YAW_TOLERANCE, _HANDOVER_YAW_TOLERANCE)
+                if giver_side < 0:
+                    yaw = yaw + torch.pi
                 particles[hand_pose] = torch.cat([xyz, yaw.unsqueeze(-1)], dim=1)
                 world_from_obj = action_4dof_to_mat4x4(particles[hand_pose])
 

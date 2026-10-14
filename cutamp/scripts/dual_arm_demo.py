@@ -40,8 +40,9 @@ left arm cannot reach::
 
 The bar is long on purpose. Two YAM grippers are ~10 cm across, so on a 5 cm cube the best mid-air
 exchange leaves 1.4 mm of arm clearance; on this bar, held at +/-8 cm, it leaves 127 mm. The two
-grasps therefore have to be at opposite ENDS, which the particle initializer arranges directly
-(``_slide_grasps_to_end``) because grasps are sampled, not optimized.
+grasps therefore have to be at opposite ENDS, with the jaws closing across the bar's width rather
+than along it, which the particle initializer arranges directly (``_aim_grasps_for_handover``)
+because grasps are sampled, not optimized.
 
 Usage::
 
