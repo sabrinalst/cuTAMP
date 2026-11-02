@@ -272,7 +272,7 @@ robot_to_fns = {
     },
     # Both arms at once, as a single 12-DOF chain. See load_bimanual_yam_dual_container.
     "bimanual_yam_dual": {
-        "rerun": partial(load_bimanual_yam_rerun, "left"),
+        "rerun": partial(load_bimanual_yam_rerun, "dual"),
         "q_home": tuple(bimanual_yam_neutral_joint_positions) * 2,
         "container": load_bimanual_yam_dual_container,
     },

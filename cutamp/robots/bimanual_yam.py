@@ -229,7 +229,8 @@ def get_bimanual_yam_gripper_spheres(
     return tensor_args.to_device(_yam_gripper_spheres_np(arm))
 
 
-def load_bimanual_yam_rerun(arm: Arm = "left", load_mesh: bool = True) -> RerunRobot:
+def load_bimanual_yam_rerun(arm: str = "left", load_mesh: bool = True) -> RerunRobot:
+    arm = _check_arm(arm, allow_dual=True)
     kin = _yam_cfg_dict(arm)["kinematics"]
     urdf_path = _ASSETS_DIR / kin["urdf_path"]
     # Mesh paths in the generated URDF are relative to the URDF's own directory, which is yourdfpy's
@@ -237,11 +238,21 @@ def load_bimanual_yam_rerun(arm: Arm = "left", load_mesh: bool = True) -> RerunR
     urdf = URDF.load(str(urdf_path), load_meshes=load_mesh)
     # RerunRobot drives every actuated joint, so pass all 16: this arm at neutral, the other parked
     # at the same posture it is locked to, and all four fingers open.
-    q_all = []
-    for a in ARMS:
-        q_all += list(bimanual_yam_neutral_joint_positions)
-    q_all += [YAM_FINGER_OPEN] * 4
-    return RerunRobot(f"bimanual_yam_{arm}", urdf, q_neutral=q_all, load_mesh=load_mesh)
+    q_by_name = {
+        **{name: q for a in ARMS for name, q in zip(yam_arm_joints(a), bimanual_yam_neutral_joint_positions)},
+        **dict.fromkeys(yam_finger_joints(), YAM_FINGER_OPEN),
+    }
+    q_all = [q_by_name[joint.name] for joint in urdf.actuated_joints]
+    active_joint_names = [name for a in ARMS for name in yam_arm_joints(a)] if arm == DUAL else yam_arm_joints(arm)
+    gripper_joint_names = yam_finger_joints() if arm == DUAL else yam_finger_joints(arm)
+    return RerunRobot(
+        f"bimanual_yam_{arm}",
+        urdf,
+        q_neutral=q_all,
+        load_mesh=load_mesh,
+        active_joint_names=active_joint_names,
+        gripper_joint_names=gripper_joint_names,
+    )
 
 
 if __name__ == "__main__":

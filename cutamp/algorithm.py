@@ -387,7 +387,19 @@ def setup_cutamp(
 
     # Setup visualizer (doesn't count towards timing)
     visualizer = (
-        RerunVisualizer(config, q_init, application_id=env.name, recording_id=experiment_id, spawn=config.rr_spawn)
+        RerunVisualizer(
+            config,
+            q_init,
+            application_id=env.name,
+            recording_id=experiment_id,
+            spawn=config.rr_spawn,
+            rrd_path=exp_logger.exp_dir / "cutamp.rrd" if isinstance(exp_logger.exp_dir, Path) else None,
+            pointcloud_path=(
+                exp_logger.exp_dir.parent / "perception" / "pointcloud.ply"
+                if isinstance(exp_logger.exp_dir, Path)
+                else None
+            ),
+        )
         if config.enable_visualizer
         else MockVisualizer()
     )

@@ -7,8 +7,12 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import logging
+import os
 from abc import ABC, abstractmethod
-from typing import Union, Optional
+from pathlib import Path
+from typing import Optional, Union
+from urllib.parse import quote, urlparse
 
 import numpy as np
 import rerun as rr
@@ -21,6 +25,8 @@ from cutamp.robots import load_rerun_robot
 from cutamp.tamp_world import TAMPWorld
 from cutamp.utils.obb import get_object_obb
 from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun, AXIS_LENGTH
+
+_log = logging.getLogger(__name__)
 
 
 class Visualizer(ABC):
@@ -130,9 +136,52 @@ class RerunVisualizer(Visualizer):
         application_id: str,
         recording_id: str,
         spawn: bool,
+        rrd_path: Path | None = None,
+        pointcloud_path: Path | None = None,
     ):
-        rr.init(application_id, recording_id=recording_id, spawn=spawn)
+        # A native Rerun window cannot be viewed through a normal SSH session. When a remote
+        # Rerun server is supplied, stream this recording to it instead; the server can host the
+        # web viewer and be reached through SSH port forwarding. Keep the existing spawn behavior
+        # unchanged for local runs.
+        connect_url = os.environ.get("TIPTOP_RERUN_CONNECT_URL", "").strip()
+        rr.init(application_id, recording_id=recording_id, spawn=False)
+
+        sinks = []
+        if connect_url:
+            sinks.append(rr.GrpcSink(connect_url))
+        elif spawn:
+            # Preserve the original local behavior while allowing a FileSink to tee the same
+            # recording to disk. rr.init(spawn=True) followed by set_sinks would replace the
+            # viewer sink, so spawn without connecting and install both sinks together below.
+            rr.spawn(connect=False)
+            sinks.append(rr.GrpcSink())
+        if rrd_path is not None:
+            rrd_path.parent.mkdir(parents=True, exist_ok=True)
+            sinks.append(rr.FileSink(rrd_path))
+        if sinks:
+            rr.set_sinks(*sinks)
+
+        if connect_url:
+            web_port = int(os.environ.get("TIPTOP_RERUN_WEB_PORT", "9090"))
+            viewer_url = f"http://localhost:{web_port}?url={quote(connect_url, safe='')}"
+            grpc_port = urlparse(connect_url).port or 9876
+            _log.info(f"Rerun web viewer: {viewer_url}")
+            _log.info(
+                f"SSH tunnel: ssh -L {web_port}:localhost:{web_port} "
+                f"-L {grpc_port}:localhost:{grpc_port} <host>"
+            )
+        if rrd_path is not None:
+            _log.info(f"Saving Rerun recording to {rrd_path}")
         self.robot = load_rerun_robot(config.robot, load_mesh=config.viz_robot_mesh)
+        if pointcloud_path is not None and pointcloud_path.is_file():
+            try:
+                import open3d as o3d
+
+                pcd = o3d.io.read_point_cloud(str(pointcloud_path))
+                rr.log("pcd", rr.Points3D(positions=pcd.points, colors=pcd.colors), static=True)
+                _log.info(f"Logged perception point cloud from {pointcloud_path}")
+            except Exception:
+                _log.exception(f"Failed to log perception point cloud from {pointcloud_path}")
         super().__init__(config, q_init)
 
     def set_time_sequence(self, timeline: str, val: int):

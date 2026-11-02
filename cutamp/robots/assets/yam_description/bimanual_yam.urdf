@@ -5,7 +5,7 @@
   <joint name="bimanual_base_mount" type="fixed">
     <parent link="world" />
     <child link="bimanual_base" />
-    <origin xyz="0.24 0 0.0551" rpy="0 0 0" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
   </joint>
   <link name="bimanual_base" />
   <link name="left_arm">
@@ -33,7 +33,7 @@
   <joint name="left_arm_fixed_joint" type="fixed">
     <parent link="bimanual_base" />
     <child link="left_arm" />
-    <origin xyz="0 0.24 0" rpy="0 -0 0" />
+    <origin xyz="0 0.262678341 0.0536" rpy="0 0 0.0794183571" />
   </joint>
   <link name="left_link_1">
     <inertial>
@@ -280,7 +280,7 @@
     <parent link="left_link_5" />
     <child link="left_link_6" />
     <origin xyz="0 0.0353 0.0395" rpy="-1.57079633 0 0" />
-    <axis xyz="0 0 -1" />
+    <axis xyz="0 0 1" />
     <limit lower="-2.0944" upper="2.0944" effort="10" velocity="3.14" />
     <dynamics damping="0.0" friction="0.1" />
   </joint>
@@ -393,7 +393,7 @@
   <joint name="right_arm_fixed_joint" type="fixed">
     <parent link="bimanual_base" />
     <child link="right_arm" />
-    <origin xyz="0 -0.24 0" rpy="0 -0 0" />
+    <origin xyz="0 -0.262678341 0.0536" rpy="0 0 -0.024601288" />
   </joint>
   <link name="right_link_1">
     <inertial>
@@ -640,7 +640,7 @@
     <parent link="right_link_5" />
     <child link="right_link_6" />
     <origin xyz="0 0.0353 0.0395" rpy="-1.57079633 0 0" />
-    <axis xyz="0 0 -1" />
+    <axis xyz="0 0 1" />
     <limit lower="-2.0944" upper="2.0944" effort="10" velocity="3.14" />
     <dynamics damping="0.0" friction="0.1" />
   </joint>

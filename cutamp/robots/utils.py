@@ -70,26 +70,70 @@ def _get_scene_transforms(
 class RerunRobot:
     """URDF robot for Rerun visualization."""
 
-    def __init__(self, name: str, urdf: URDF, q_neutral: Union[Sequence[float], None] = None, load_mesh: bool = True):
+    def __init__(
+        self,
+        name: str,
+        urdf: URDF,
+        q_neutral: Union[Sequence[float], None] = None,
+        load_mesh: bool = True,
+        active_joint_names: Union[Sequence[str], None] = None,
+        gripper_joint_names: Union[Sequence[str], None] = None,
+    ):
         self.name = name
         self.urdf = urdf
+        self.active_joint_names = tuple(active_joint_names or ())
+        self.gripper_joint_names = tuple(gripper_joint_names or ())
+        self._joint_name_to_idx = {joint.name: idx for idx, joint in enumerate(self.urdf.actuated_joints)}
         rr.log(self.urdf.base_link, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         log_scene(scene=self.urdf.scene, node=self.urdf.base_link, path=self.name, static=False, add_mesh=load_mesh)
         if q_neutral is not None:
-            self.set_joint_positions(q_neutral)
+            # q_neutral is always authored in the URDF's full actuated-joint order. Do not run it
+            # through the active-chain remapping below: for a dual chain the compact planner vector
+            # happens to have the same length as the full URDF vector, but a different order.
+            if len(q_neutral) != self.urdf.num_actuated_joints:
+                raise ValueError(
+                    f"q_neutral has {len(q_neutral)} joints, expected {self.urdf.num_actuated_joints}"
+                )
+            self.urdf.update_cfg(q_neutral)
+            log_scene(scene=self.urdf.scene, node=self.urdf.base_link, path=self.name, static=False, add_mesh=False)
 
     @property
     def joint_positions(self) -> np.ndarray:
         return self.urdf.cfg
 
     def set_joint_positions(self, joint_positions: Sequence[float]) -> None:
-        # Append the remaining joint positions, this can happen if we're only set arm joints not gripper
-        if len(joint_positions) != self.urdf.num_actuated_joints:
-            start_idx = len(joint_positions)
-            joint_positions = [*joint_positions, *self.urdf.cfg[start_idx:]]
+        joint_positions = self._expand_joint_positions(joint_positions)
 
         self.urdf.update_cfg(joint_positions)
         log_scene(scene=self.urdf.scene, node=self.urdf.base_link, path=self.name, static=False, add_mesh=False)
+
+    def _expand_joint_positions(self, joint_positions: Sequence[float]) -> np.ndarray:
+        """Map a planner-chain vector into the full URDF actuated-joint order.
+
+        Most robots expose their planning joints first in URDF order, so the historical append logic
+        below is correct. The bimanual YAM does not: its URDF interleaves each arm's fingers
+        (left6, left_fingers, right6, right_fingers), while cuRobo exposes compact active chains
+        (right6, or left6+right6). Named mappings prevent a right-arm plan from animating the left arm.
+        """
+        values = np.asarray(joint_positions, dtype=float).reshape(-1)
+        if self.active_joint_names:
+            controlled_names = (*self.active_joint_names, *self.gripper_joint_names)
+            if len(values) == len(self.active_joint_names):
+                names = self.active_joint_names
+            elif len(values) == len(controlled_names):
+                names = controlled_names
+            else:
+                names = ()
+            if names:
+                full = np.asarray(self.urdf.cfg, dtype=float).copy()
+                for name, value in zip(names, values):
+                    full[self._joint_name_to_idx[name]] = value
+                return full
+
+        # Generic path: append unchanged joints when only the arm chain was supplied.
+        if len(values) != self.urdf.num_actuated_joints:
+            values = np.concatenate((values, np.asarray(self.urdf.cfg[len(values):], dtype=float)))
+        return values
 
     def get_rr_columns(self, joint_positions: Float[torch.Tensor, "n d"]) -> Dict[str, rr.Transform3D.columns]:
         """
@@ -115,13 +159,12 @@ class RerunRobot:
         joint_positions = joint_positions.detach().cpu()
         n, d = joint_positions.shape
 
-        # Add remaining joint positions (e.g., for the gripper) if needed
-        if d != self.urdf.num_actuated_joints:
-            q_remaining = self.urdf.cfg[d:]
-            q_remaining = torch.tensor(q_remaining, dtype=joint_positions.dtype)
-            # Expand to batch size and concatenate with existing joint positions
-            q_remaining = q_remaining.expand((n, len(q_remaining)))
-            joint_positions = torch.cat([joint_positions, q_remaining], dim=1)
+        # Expand compact planner vectors into the URDF's full actuated-joint order. This is a named
+        # mapping for branched robots such as the bimanual YAM and the historical append for others.
+        joint_positions = torch.tensor(
+            np.stack([self._expand_joint_positions(q.numpy()) for q in joint_positions]),
+            dtype=joint_positions.dtype,
+        )
 
         path_to_tforms = {}  # map of path to list of transforms
 
